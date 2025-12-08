@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Seasteading Lake Grid</title>
+  <style>
+    :root {
+      --bg: #050a12;
+      --water: #0e1f33;
+      --shore: #90a4ae;
+      --grid: rgba(124, 169, 218, 0.35);
+      --tile: #f4d37a;
+      --tile-border: #c39b3a;
+      --text: #eaf2ff;
+      --panel: rgba(12, 19, 30, 0.8);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: radial-gradient(120% 120% at 20% 20%, #102641, #060b13 55%);
+      color: var(--text);
+      font-family: "IBM Plex Sans", system-ui, -apple-system, sans-serif;
+      overflow: hidden;
+    }
+    #overlay {
+      position: fixed;
+      left: 0; right: 0; bottom: 0;
+      padding: 10px 12px;
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+      gap: 10px;
+      background: linear-gradient(to top, rgba(5, 8, 12, 0.92), rgba(5, 8, 12, 0.5));
+      border-top: 1px solid rgba(255,255,255,0.04);
+      backdrop-filter: blur(6px);
+    }
+    .card {
+      background: var(--panel);
+      border: 1px solid rgba(255,255,255,0.08);
+      border-radius: 8px;
+      padding: 10px;
+      box-shadow: 0 8px 18px rgba(0,0,0,0.4);
+      cursor: pointer;
+    }
+    .card h3 {
+      margin: 0 0 6px;
+      font-size: 15px;
+      letter-spacing: 0.02em;
+    }
+    .card ul {
+      margin: 0;
+      padding-left: 16px;
+      line-height: 1.35;
+      font-size: 13px;
+    }
+    #hud {
+      position: fixed;
+      left: 12px;
+      top: 12px;
+      padding: 8px 10px;
+      background: rgba(0,0,0,0.45);
+      border: 1px solid rgba(255,255,255,0.1);
+      border-radius: 6px;
+      font-size: 13px;
+      z-index: 2;
+    }
+    #hud button {
+      margin-right: 6px;
+      background: #1f4060;
+      border: 1px solid #2d567c;
+      color: var(--text);
+      padding: 6px 10px;
+      border-radius: 6px;
+      cursor: pointer;
+    }
+    #hud button:hover { background: #2d567c; }
+  </style>
+</head>
+<body>
+  <div id="hud">
+    <button id="reset">Reset tiles</button>
+    <button id="shuffle">Shuffle tiles</button>
+    Click cards to focus. Drag tiles to move.
+  </div>
+  <div id="overlay"></div>
+  <script type="module" src="./app.js"></script>
+</body>
+</html>

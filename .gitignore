@@ -1,0 +1,21 @@
+# build artifacts
+server
+server_test_cov
+server_test
+server.pid
+server.log
+tiles.json
+
+# coverage
+*.gcno
+*.gcda
+*.gcov
+coverage.txt
+coverage.info
+coverage_html/
+
+# logs
+*.log
+
+# system/editor
+.DS_Store
