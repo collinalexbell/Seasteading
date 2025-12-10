@@ -75,13 +75,16 @@ let drawMode = false;
 const drawState = { active: false, stroke: null };
 const ship = { x: 0, y: 0, heading: 0, speed: 8000, aground: false };
 let shipMesh = null;
-const defaultShipProgram = `// Ship program runs on the MMO server.\n// This code will be uploaded; the server executes fn(ship, dt, env).\n// ship: { x, y, heading, speed }\n// dt: seconds since last frame\n// env: { pointInLake(x,y), lakeBounds, log(...) }\nconst cruise = 12000;\nship.heading += 0.3 * dt;\nif (!env.pointInLake(ship.x, ship.y)) {\n  ship.heading += Math.PI * 0.6;\n}\nreturn { heading: ship.heading, speed: cruise };`;
+const playerShip = { id: "player", x: 0, y: 0, heading: 0, speed: 600, aground: false };
+let playerMesh = null;
+const defaultShipProgram = `// Player ship program (runs on server). Uses WASD keys via env.inputKeys.\n// ship: { x, y, heading, speed }\n// dt: seconds\n// env: { inputKeys, pointInLake(x,y), lakeBounds, log(...) }\nconst keys = env.inputKeys || {};\nconst turn = 2.5; // radians/sec\nlet h = ship.heading;\nlet speed = ship.speed;\nif (keys.KeyA) h -= turn * dt;\nif (keys.KeyD) h += turn * dt;\nif (keys.KeyW) speed = 20000;\nelse if (keys.KeyS) speed = -10000;\nelse speed *= 0.92;\nif (!env.pointInLake(ship.x, ship.y)) {\n  h += Math.PI * 0.6;\n  speed = 0;\n}\nreturn { heading: h, speed };`;
 let shipProgramCode = defaultShipProgram;
 const shipEnv = {
   pointInLake,
   lakeBounds,
   aground: () => ship.aground
 };
+const players = {};
 let runOnClose = true;
 let stateData = {};
 let shipStateDirty = false;
@@ -91,6 +94,39 @@ let wsConnected = false;
 let wsLastSend = 0;
 let wsSendIntervalMs = 200;
 const pendingControl = { heading: 0, speed: 0, has: false };
+let autoPlayerFocusDone = false;
+class KeyboardControls {
+  constructor() {
+    this.keys = {};
+    this.lastSentAt = 0;
+    this.bound = false;
+  }
+  bind(target) {
+    if (this.bound) return;
+    this.bound = true;
+    target.setAttribute("tabindex", "0");
+    target.style.outline = "none";
+    const onFocus = () => target.focus();
+    target.addEventListener("click", onFocus);
+    target.addEventListener("keydown", (e) => {
+      if (e.repeat) return;
+      this.keys[e.code] = true;
+      sendInputSnapshot(performance.now());
+    });
+    target.addEventListener("keyup", (e) => {
+      this.keys[e.code] = false;
+      sendInputSnapshot(performance.now());
+    });
+  }
+  snapshot(nowMs) {
+    if (!wsConnected || !ws) return;
+    if (nowMs - this.lastSentAt < 50) return;
+    this.lastSentAt = nowMs;
+    const payload = JSON.stringify({ shipId: playerShip.id, input: { keys: this.keys } });
+    ws.send(payload);
+  }
+}
+const keyControls = new KeyboardControls();
 const initialRoll = (() => {
   // simple deterministic pseudo-roll from session id
   let seed = 0;
@@ -115,9 +151,6 @@ async function loadAll() {
     if (d.status === "fulfilled" && Array.isArray(d.value.strokes)) strokes = d.value.strokes;
     if (s.status === "fulfilled" && typeof s.value === "object" && s.value !== null) {
       stateData = s.value;
-      if (typeof stateData.shipProgram === "string" && stateData.shipProgram.trim()) {
-        shipProgramCode = stateData.shipProgram;
-      }
       if (stateData.ship && typeof stateData.ship === "object") {
         ship.x = Number(stateData.ship.x) || 0;
         ship.y = Number(stateData.ship.y) || 0;
@@ -146,7 +179,6 @@ async function saveDraw() {
 async function saveState() {
   stateData = {
     ...stateData,
-    shipProgram: shipProgramCode,
     shipRunOnClose: runOnClose,
     ship: { x: ship.x, y: ship.y, heading: ship.heading, speed: ship.speed, aground: ship.aground }
   };
@@ -248,9 +280,8 @@ scene.add(lakeGroup);
 // --------------------
 // Ship
 // --------------------
-function createShipMesh() {
+function createShipMesh(size = 6000, color = 0xff8c42, ring = false) {
   const geom = new THREE.BufferGeometry();
-  const size = 6000;
   const verts = new Float32Array([
     0, size * 0.9, 0,
     -size * 0.6, -size * 0.5, 0,
@@ -259,16 +290,32 @@ function createShipMesh() {
   geom.setAttribute("position", new THREE.BufferAttribute(verts, 3));
   geom.setIndex([0,1,2]);
   geom.computeVertexNormals();
-  const mat = new THREE.MeshBasicMaterial({ color: 0xff8c42, transparent: true, opacity: 0.92 });
+  const mat = new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.92 });
   const mesh = new THREE.Mesh(geom, mat);
-  mesh.position.set(ship.x, ship.y, 12);
+  mesh.position.set(0, 0, 12);
   mesh.userData.type = "ship";
-  return mesh;
+  if (!ring) return mesh;
+  const ringGeom = new THREE.RingGeometry(size * 0.7, size * 1.0, 24);
+  const ringMat = new THREE.MeshBasicMaterial({ color: 0xffffff, opacity: 0.4, transparent: true });
+  const ringMesh = new THREE.Mesh(ringGeom, ringMat);
+  ringMesh.position.set(0, 0, 10);
+  const group = new THREE.Group();
+  group.add(mesh);
+  group.add(ringMesh);
+  group.userData.type = "ship";
+  return group;
 }
 function ensureShip() {
   if (!shipMesh) {
-    shipMesh = createShipMesh();
+    shipMesh = createShipMesh(6000, 0xff8c42);
     scene.add(shipMesh);
+  }
+}
+function ensurePlayerShip() {
+  if (!playerMesh) {
+    // Smaller ship with high-contrast tint and ring for visibility.
+    playerMesh = createShipMesh(400, 0x42bff5, true);
+    scene.add(playerMesh);
   }
 }
 function applyShipToMesh() {
@@ -276,8 +323,14 @@ function applyShipToMesh() {
   shipMesh.position.set(ship.x, ship.y, 12);
   shipMesh.rotation.z = ship.heading - Math.PI / 2;
 }
+function applyPlayerToMesh() {
+  if (!playerMesh) return;
+  playerMesh.position.set(playerShip.x, playerShip.y, 14);
+  playerMesh.rotation.z = playerShip.heading - Math.PI / 2;
+  playerMesh.visible = true;
+}
 async function uploadShipProgram(code) {
-  try { await api("/program", "POST", { shipId: "ship", code }); }
+  try { await api("/program", "POST", { shipId: playerShip.id, code }); }
   catch (e) { console.warn("uploadShipProgram", e); }
 }
 
@@ -605,6 +658,8 @@ document.getElementById("registerBtn").onclick = () => {
   registerUser(payload);
   alert("Registration submitted");
 };
+document.getElementById("focusMain").onclick = () => focusOnShip(shipMesh, 80);
+document.getElementById("focusPlayer").onclick = () => focusOnShip(playerMesh, 200);
 
 function focusOnCard(cardId) {
   const mesh = cardMeshes.find(m => m.userData.card.id === cardId);
@@ -614,6 +669,16 @@ function focusOnCard(cardId) {
   camera.position.set(target.x, target.y, 1000);
   camera.lookAt(camTarget);
   camera.zoom = 80;
+  camera.updateProjectionMatrix();
+}
+
+function focusOnShip(mesh, zoomVal = 150) {
+  if (!mesh) return;
+  const target = mesh.position.clone();
+  camTarget.set(target.x, target.y, 0);
+  camera.position.set(target.x, target.y, 600);
+  camera.lookAt(camTarget);
+  camera.zoom = zoomVal;
   camera.updateProjectionMatrix();
 }
 
@@ -669,6 +734,8 @@ function animate() {
   const dt = Math.min((now - animate.lastTime) / 1000, 0.1);
   animate.lastTime = now;
   applyShipToMesh();
+  applyPlayerToMesh();
+  sendInputSnapshot(now);
   requestAnimationFrame(animate);
   renderer.render(scene, camera);
 }
@@ -680,6 +747,8 @@ animate.lastTime = performance.now();
 (async function init() {
   await loadAll();
   ensureShip();
+  ensurePlayerShip();
+  bindInput();
   compileShipProgram(shipProgramCode);
   rebuildCards();
   updateCardOpacity(1);
@@ -744,6 +813,16 @@ function connectRealtime() {
   ws.onmessage = (e) => {
     try {
       const data = JSON.parse(e.data);
+      if (data.refresh) {
+        const stored = localStorage.getItem("refreshToken");
+        if (stored !== data.refresh) {
+          localStorage.setItem("refreshToken", data.refresh);
+          if (stored) {
+            setTimeout(() => location.reload(), 150);
+            return;
+          }
+        }
+      }
       if (data.ship) {
         ship.x = typeof data.ship.x === "number" ? data.ship.x : ship.x;
         ship.y = typeof data.ship.y === "number" ? data.ship.y : ship.y;
@@ -751,6 +830,22 @@ function connectRealtime() {
         ship.speed = typeof data.ship.speed === "number" ? data.ship.speed : ship.speed;
         ship.aground = !!data.ship.aground;
       }
+      if (data.player) {
+        playerShip.x = typeof data.player.x === "number" ? data.player.x : playerShip.x;
+    playerShip.y = typeof data.player.y === "number" ? data.player.y : playerShip.y;
+        playerShip.heading = typeof data.player.heading === "number" ? data.player.heading : playerShip.heading;
+        playerShip.speed = typeof data.player.speed === "number" ? data.player.speed : playerShip.speed;
+        playerShip.aground = !!data.player.aground;
+        if (!autoPlayerFocusDone) {
+          autoPlayerFocusDone = true;
+          focusOnShip(playerMesh, 550);
+        }
+      }
+      // expose for tests/diagnostics
+      window.__lastState = {
+        ship: { ...ship },
+        player: { ...playerShip }
+      };
     } catch (err) {
       console.warn("ws message parse", err);
     }
@@ -761,23 +856,26 @@ function sendRealtimeCommand(heading, speed, nowMs) {
   if (!wsConnected || !ws) return;
   if (nowMs - wsLastSend < wsSendIntervalMs) return;
   wsLastSend = nowMs;
-  const payload = JSON.stringify({ control: { heading, speed } });
+  const payload = JSON.stringify({ shipId: playerShip.id, control: { heading, speed } });
   ws.send(payload);
 }
 
-// Input -> server ws
-const keyState = {};
-function sendInputUpdate(code, pressed) {
-  if (!wsConnected || !ws) return;
-  const payload = JSON.stringify({ input: { keys: { [code]: pressed } } });
-  ws.send(payload);
+// Input -> server ws (Three.js canvas focus)
+function sendInputSnapshot(nowMs) {
+  keyControls.snapshot(nowMs);
 }
-window.addEventListener("keydown", (e) => {
-  if (e.repeat) return;
-  keyState[e.code] = true;
-  sendInputUpdate(e.code, true);
-});
-window.addEventListener("keyup", (e) => {
-  keyState[e.code] = false;
-  sendInputUpdate(e.code, false);
-});
+
+function bindInput() {
+  const target = renderer.domElement;
+  keyControls.bind(target);
+  // also listen on window so headless/browser key injection works even if canvas focus is absent
+  window.addEventListener("keydown", (e) => {
+    if (e.repeat) return;
+    keyControls.keys[e.code] = true;
+    sendInputSnapshot(performance.now());
+  });
+  window.addEventListener("keyup", (e) => {
+    keyControls.keys[e.code] = false;
+    sendInputSnapshot(performance.now());
+  });
+}

@@ -20,6 +20,8 @@
 #include <unordered_map>
 #include <mutex>
 #include <algorithm>
+#include <filesystem>
+#include <nlohmann/json.hpp>
 
 #include <openssl/sha.h>
 #include <openssl/evp.h>
@@ -55,6 +57,8 @@ static const int kDefaultPort = 8081;
 static const char* kDefaultFile = "tiles.json";
 static volatile sig_atomic_t g_stop = 0;
 static const char* kRunnerSock = "/tmp/ship_runner.sock";
+static const char* kGameCodeDir = "game_code";
+static std::string g_refreshToken;
 
 extern "C" void __gcov_flush() __attribute__((weak));
 
@@ -266,11 +270,19 @@ bool CheckAground(const LakePoly& lp, ShipState& ship, double margin) {
 }
 
 // Global MMO state
-static ShipState g_ship;
-static ControlInput g_control;
+static std::unordered_map<std::string, ShipState> g_ships = {
+    {"main", {0,0,0,0,false}},
+    {"player", {20000,0,0,0,false}}
+};
+static std::unordered_map<std::string, ControlInput> g_controls;
+static std::unordered_map<std::string, std::unordered_map<std::string, bool>> g_keyStates;
+static std::mutex g_shipMutex;
 static LakePoly g_lakePoly = BuildLakePoly();
 static std::mutex g_inputMutex;
 static std::unordered_map<std::string, bool> g_keyState;
+static bool g_debugLogs = true;
+static bool g_forceIdle = false;
+static bool g_traceInput = true;
 
 // --------------------
 // Runner (node) IPC over UNIX socket
@@ -289,25 +301,31 @@ int ConnectRunner() {
     return fd;
 }
 
-bool RunnerStep(const ShipState& ship, double dt, ControlInput& out) {
+bool RunnerStep(const std::string& shipId,
+                const ShipState& ship,
+                const std::unordered_map<std::string, bool>& keys,
+                double dt,
+                ControlInput& out,
+                ShipState& outShip) {
     int fd = ConnectRunner();
     if (fd < 0) return false;
     std::ostringstream req;
-    req << R"({"cmd":"step","shipId":"ship","ship":{)"
+    req << R"({"cmd":"step","shipId":")" << shipId << R"(","ship":{)"
         << "\"x\":" << ship.x << ",\"y\":" << ship.y
         << ",\"heading\":" << ship.heading << ",\"speed\":" << ship.speed
         << "},\"dt\":" << dt << ",\"input\":{\"keys\":{";
-    {
-        std::lock_guard<std::mutex> lock(g_inputMutex);
-        bool first = true;
-        for (const auto& kv : g_keyState) {
-            if (!first) req << ",";
-            first = false;
-            req << "\"" << kv.first << "\":" << (kv.second ? "true" : "false");
-        }
+    bool first = true;
+    for (const auto& kv : keys) {
+        if (!first) req << ",";
+        first = false;
+        req << "\"" << kv.first << "\":" << (kv.second ? "true" : "false");
     }
     req << "}}}\n";
     auto s = req.str();
+    if (g_debugLogs) {
+        std::cerr << "[runner step] ship=" << shipId << " keys=" << keys.size()
+                  << " pos=(" << ship.x << "," << ship.y << ") dt=" << dt << "\n";
+    }
     if (send(fd, s.data(), s.size(), 0) <= 0) { close(fd); return false; }
 
     std::string resp;
@@ -336,31 +354,66 @@ bool RunnerStep(const ShipState& ship, double dt, ControlInput& out) {
     size_t shipPos = resp.find("\"ship\"");
     size_t controlPos = resp.find("\"control\"");
 
-    g_ship.x = findNum("\"x\"", shipPos);
-    g_ship.y = findNum("\"y\"", shipPos);
-    g_ship.heading = findNum("\"heading\"", shipPos);
-    g_ship.speed = findNum("\"speed\"", shipPos);
+    outShip.x = findNum("\"x\"", shipPos);
+    outShip.y = findNum("\"y\"", shipPos);
+    outShip.heading = findNum("\"heading\"", shipPos);
+    outShip.speed = findNum("\"speed\"", shipPos);
 
     out.heading = findNum("\"heading\"", controlPos);
     out.speed = findNum("\"speed\"", controlPos);
     out.has = true;
+    if (g_debugLogs) {
+        std::cerr << "[runner step resp] ship=" << shipId
+                  << " outPos=(" << outShip.x << "," << outShip.y << ")"
+                  << " ctrl=(" << out.heading << "," << out.speed << ")\n";
+    }
     return true;
 }
 
-bool RunnerSetProgram(const std::string& code) {
+bool RunnerSetProgram(const std::string& shipId, const std::string& payload) {
     int fd = ConnectRunner();
     if (fd < 0) return false;
+    std::string msg;
     std::ostringstream req;
-    req << R"({"cmd":"set_program","shipId":"ship","code":")";
-    for (char c : code) {
+    req << R"({"cmd":"set_program","shipId":")" << shipId << R"(","code":")";
+    for (char c : payload) {
         if (c == '"' || c == '\\') req << '\\';
         req << c;
     }
     req << "\"}\n";
-    auto s = req.str();
-    if (send(fd, s.data(), s.size(), 0) <= 0) { close(fd); return false; }
+    msg = req.str();
+    if (send(fd, msg.data(), msg.size(), 0) <= 0) { close(fd); return false; }
     close(fd);
     return true;
+}
+
+bool EnsureGameCodeDir() {
+    std::error_code ec;
+    if (!std::filesystem::exists(kGameCodeDir)) {
+        return std::filesystem::create_directories(kGameCodeDir, ec) || std::filesystem::exists(kGameCodeDir);
+    }
+    return true;
+}
+
+std::string ExtractJsonString(const std::string& body, const std::string& key) {
+    try {
+        auto parsed = nlohmann::json::parse(body);
+        if (parsed.contains(key) && parsed[key].is_string()) return parsed[key].get<std::string>();
+    } catch (...) {}
+    return "";
+}
+
+void LoadGameCode() {
+    if (!EnsureGameCodeDir()) return;
+    for (auto& entry : std::filesystem::directory_iterator(kGameCodeDir)) {
+        if (!entry.is_regular_file()) continue;
+        auto path = entry.path();
+        auto shipId = path.stem().string();
+        std::string code = readFile(path.string());
+        if (!code.empty()) {
+            RunnerSetProgram(shipId, code);
+        }
+    }
 }
 
 // --------------------
@@ -373,13 +426,33 @@ static std::set<int> g_wsClients;
 
 void BroadcastShipState() {
     std::lock_guard<std::mutex> lock(g_wsMutex);
-    std::ostringstream resp;
-    resp << "{\"ship\":{\"x\":" << g_ship.x << ",\"y\":" << g_ship.y
-         << ",\"heading\":" << g_ship.heading << ",\"speed\":" << g_ship.speed
-         << ",\"aground\":" << (g_ship.aground ? "true" : "false") << "}}";
-    auto frame = wsFrameText(resp.str());
     std::vector<int> dead;
     for (int fd : g_wsClients) {
+        // Build per-client payload: always include main, include player's if known
+        std::ostringstream resp;
+        {
+            std::lock_guard<std::mutex> shipLock(g_shipMutex);
+            auto mainIt = g_ships.find("main");
+            if (mainIt != g_ships.end()) {
+                const auto& s = mainIt->second;
+                resp << "{\"ship\":{\"id\":\"main\",\"x\":" << s.x << ",\"y\":" << s.y
+                     << ",\"heading\":" << s.heading << ",\"speed\":" << s.speed
+                     << ",\"aground\":" << (s.aground ? "true" : "false") << "}";
+            } else {
+                resp << "{\"ship\":null";
+            }
+            // player ship if tracked per fd
+            // we do not store fd->shipId; fall back to session "player"
+            auto pit = g_ships.find("player");
+            if (pit != g_ships.end()) {
+                const auto& p = pit->second;
+                resp << ",\"player\":{\"id\":\"player\",\"x\":" << p.x << ",\"y\":" << p.y
+                     << ",\"heading\":" << p.heading << ",\"speed\":" << p.speed
+                     << ",\"aground\":" << (p.aground ? "true" : "false") << "}";
+            }
+            resp << ",\"refresh\":\"" << g_refreshToken << "\"}";
+        }
+        auto frame = wsFrameText(resp.str());
         ssize_t n = send(fd, frame.data(), frame.size(), 0);
         if (n <= 0) dead.push_back(fd);
     }
@@ -395,19 +468,36 @@ void PhysicsLoop() {
         if (dt > 0.2) dt = 0.2;
         last = now;
 
-        // apply control from runner or fallback to last control
-        ControlInput fromRunner{};
-        if (RunnerStep(g_ship, dt, fromRunner) && fromRunner.has) {
-            g_ship.heading = fromRunner.heading;
-            g_ship.speed = fromRunner.speed;
-        } else if (g_control.has) {
-            g_ship.heading = g_control.heading;
-            g_ship.speed = g_control.speed;
-        }
+        {
+            std::lock_guard<std::mutex> lock(g_shipMutex);
+            for (auto& kv : g_ships) {
+                const std::string& shipId = kv.first;
+                ShipState& ship = kv.second;
 
-        g_ship.x += std::cos(g_ship.heading) * g_ship.speed * dt;
-        g_ship.y += std::sin(g_ship.heading) * g_ship.speed * dt;
-        CheckAground(g_lakePoly, g_ship, margin);
+                // keys for this ship
+                std::unordered_map<std::string, bool> keys;
+                auto itKeys = g_keyStates.find(shipId);
+                if (itKeys != g_keyStates.end()) keys = itKeys->second;
+
+                ControlInput in{};
+                ShipState updated = ship;
+                auto itCtrl = g_controls.find(shipId);
+                ControlInput fallback = (itCtrl != g_controls.end()) ? itCtrl->second : ControlInput{};
+
+                if (g_forceIdle) {
+                    updated.speed = 0;
+                } else if (RunnerStep(shipId, ship, keys, dt, in, updated) && in.has) {
+                    g_controls[shipId] = in;
+                } else if (fallback.has) {
+                    updated.heading = fallback.heading;
+                    updated.speed = fallback.speed;
+                }
+                updated.x += std::cos(updated.heading) * updated.speed * dt;
+                updated.y += std::sin(updated.heading) * updated.speed * dt;
+                CheckAground(g_lakePoly, updated, margin);
+                ship = updated;
+            }
+        }
         BroadcastShipState();
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
@@ -448,11 +538,19 @@ void handleClient(int clientFd, const sockaddr_in& peer) {
             std::lock_guard<std::mutex> lock(g_wsMutex);
             g_wsClients.insert(clientFd);
         }
+        // send refresh token immediately
+        {
+            std::ostringstream resp;
+            resp << "{\"refresh\":\"" << g_refreshToken << "\"}";
+            auto frame = wsFrameText(resp.str());
+            send(clientFd, frame.data(), frame.size(), 0);
+        }
         std::string payload;
         while (!g_stop && wsReadFrame(clientFd, payload)) {
             // Expect control message: {"control":{"heading":..., "speed":...}}
             auto posCtrl = payload.find("\"control\"");
             auto posInput = payload.find("\"input\"");
+            std::string shipId = "player"; // default player ship
             if (posCtrl != std::string::npos) {
                 auto findNum = [&](const char* key) -> double {
                     auto pos = payload.find(key, posCtrl);
@@ -461,9 +559,11 @@ void handleClient(int clientFd, const sockaddr_in& peer) {
                     if (pos == std::string::npos) return 0.0;
                     return std::atof(payload.c_str() + pos + 1);
                 };
-                g_control.heading = findNum("\"heading\"");
-                g_control.speed = findNum("\"speed\"");
-                g_control.has = true;
+                ControlInput ci;
+                ci.heading = findNum("\"heading\"");
+                ci.speed = findNum("\"speed\"");
+                ci.has = true;
+                g_controls[shipId] = ci;
             }
             if (posInput != std::string::npos) {
                 // Parse input keys map: "keys":{"KeyW":true,...}
@@ -483,7 +583,10 @@ void handleClient(int clientFd, const sockaddr_in& peer) {
                             std::string val = kv.substr(colon + 1);
                             key.erase(std::remove(key.begin(), key.end(), '"'), key.end());
                             bool pressed = (val.find("true") != std::string::npos || val.find("1") != std::string::npos);
-                            g_keyState[key] = pressed;
+                            g_keyStates[shipId][key] = pressed;
+                        }
+                        if (g_traceInput) {
+                            std::cerr << "[input] ship=" << shipId << " keys=" << g_keyStates[shipId].size() << "\n";
                         }
                     }
                 }
@@ -558,7 +661,17 @@ void handleClient(int clientFd, const sockaddr_in& peer) {
             send(clientFd, resp.data(), resp.size(), 0);
             return;
         }
-        bool ok = RunnerSetProgram(body);
+        std::string shipId = ExtractJsonString(body, "shipId");
+        if (shipId.empty()) shipId = "player";
+        std::string codeStr = ExtractJsonString(body, "code");
+        if (codeStr.empty()) codeStr = body;
+        EnsureGameCodeDir();
+        writeFile(std::string(kGameCodeDir) + "/" + shipId + ".js", codeStr);
+        bool ok = RunnerSetProgram(shipId, codeStr);
+        if (g_debugLogs) {
+            std::cerr << "[program] ship=" << shipId << " len=" << codeStr.size()
+                      << " ok=" << ok << "\n";
+        }
         std::string resp = ok ? httpResponse(R"({"ok":true})")
                               : httpResponse(R"({"error":"runner unavailable"})", "500 Internal Server Error");
         send(clientFd, resp.data(), resp.size(), 0);
@@ -717,9 +830,16 @@ int main() {
     signal(SIGTERM, HandleSignal);
     signal(SIGINT, HandleSignal);
     const int port = GetPort();
+    {
+        std::ostringstream ss;
+        ss << "r-" << std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::system_clock::now().time_since_epoch()).count();
+        g_refreshToken = ss.str();
+    }
 
     std::thread udpThread(runUdpServer, port);
     std::thread physicsThread(PhysicsLoop);
+    LoadGameCode();
     int serverFd = socket(AF_INET, SOCK_STREAM, 0);
     if (serverFd < 0) {
         std::cerr << "socket error: " << strerror(errno) << "\n";
@@ -771,3 +891,6 @@ int main() {
     if (__gcov_flush) __gcov_flush();
     return 0;
 }
+bool EnsureGameCodeDir();
+std::string ExtractField(const std::string& body, const std::string& key);
+void LoadGameCode();

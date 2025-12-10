@@ -62,11 +62,26 @@ if (!env.pointInLake(ship.x, ship.y)) {
 }
 return { heading: ship.heading, speed: cruise };`;
 
-const ships = new Map(); // shipId -> {state, program, script, lastControl}
+const ships = new Map(); // shipId -> {state, program, script, lastControl, inputKeys}
 const subscribers = new Set();
 
 function compileProgram(code) {
   return new vm.Script(`(function(ship, dt, env) { ${code}\n})`);
+}
+
+function loadProgramFile(shipId) {
+  try {
+    const p = path.join(process.cwd(), "game_code", `${shipId}.js`);
+    if (fs.existsSync(p)) {
+      const code = fs.readFileSync(p, "utf8");
+      const rec = getShip(shipId);
+      rec.program = code;
+      rec.script = compileProgram(code);
+      console.log(`[runner] loaded program for ${shipId} from ${p}`);
+    }
+  } catch (e) {
+    console.warn("[runner] loadProgramFile", e);
+  }
 }
 
 function getShip(id) {
@@ -75,8 +90,10 @@ function getShip(id) {
       state: { x: 0, y: 0, heading: 0, speed: 0 },
       program: defaultProgram,
       script: compileProgram(defaultProgram),
-      lastControl: { heading: 0, speed: 0 }
+      lastControl: { heading: 0, speed: 0 },
+      inputKeys: {}
     });
+    loadProgramFile(id);
   }
   return ships.get(id);
 }
@@ -96,6 +113,7 @@ function clampShip(ship) {
 function runProgram(shipId, dt) {
   const rec = getShip(shipId);
   const ship = rec.state;
+  if (!rec.inputKeys) rec.inputKeys = {};
   const context = vm.createContext({
     ship,
     dt,
@@ -103,7 +121,7 @@ function runProgram(shipId, dt) {
       pointInLake,
       lakeBounds: lakePoly.bounds,
       log: (...args) => {},
-      inputKeys: rec.inputKeys || {}
+      inputKeys: rec.inputKeys
     }
   });
   let control = rec.lastControl;
@@ -174,7 +192,7 @@ function handleLine(sock, line) {
       if (msg.input && msg.input.keys && typeof msg.input.keys === "object") {
         rec.inputKeys = msg.input.keys;
       } else {
-        rec.inputKeys = {};
+        rec.inputKeys = rec.inputKeys || {};
       }
       const dt = typeof msg.dt === "number" ? msg.dt : 0.05;
       const result = runProgram(shipId, dt);
