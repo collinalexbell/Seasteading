@@ -102,7 +102,8 @@ function runProgram(shipId, dt) {
     env: {
       pointInLake,
       lakeBounds: lakePoly.bounds,
-      log: (...args) => {}
+      log: (...args) => {},
+      inputKeys: rec.inputKeys || {}
     }
   });
   let control = rec.lastControl;
@@ -162,6 +163,22 @@ function handleLine(sock, line) {
       const rec = getShip(shipId);
       rec.state = Object.assign({}, rec.state, msg.ship || {});
       respond({ ok: true });
+      break;
+    }
+    case "step": {
+      const shipId = msg.shipId || "ship";
+      const rec = getShip(shipId);
+      if (msg.ship && typeof msg.ship === "object") {
+        rec.state = Object.assign({}, rec.state, msg.ship);
+      }
+      if (msg.input && msg.input.keys && typeof msg.input.keys === "object") {
+        rec.inputKeys = msg.input.keys;
+      } else {
+        rec.inputKeys = {};
+      }
+      const dt = typeof msg.dt === "number" ? msg.dt : 0.05;
+      const result = runProgram(shipId, dt);
+      respond({ ok: true, ship: result.ship, control: result.control });
       break;
     }
     case "set_tick_rate": {

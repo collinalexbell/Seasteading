@@ -10,6 +10,4 @@ export SBCL_HOME="${SBCL_HOME:-}"
 sbcl --noinform --eval "(load \"${ROOT}/mmo-gm.lisp\")" \
      --eval "(in-package :mmo-gm)" \
      --eval "(start-all)" \
-     --eval "(progn (format t \"~%Started. In package: ~A~%\" *package*) (sb-ext:quit))" \
-     --disable-debugger \
-     --quit
+     --eval "(format t \"~%Started. In package: ~A~%\" *package*)" 

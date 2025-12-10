@@ -20,7 +20,23 @@ if [[ -f "${PIDFILE}" ]]; then
 fi
 
 echo "[tile-server] building ${SRC}"
-g++ -std=c++17 -O2 -pipe "${SRC}" -o "${BIN}"
+if command -v g++ >/dev/null 2>&1; then
+  if ! g++ -std=c++17 -O2 -pipe -pthread "${SRC}" -lssl -lcrypto -o "${BIN}"; then
+    if [[ -x "${BIN}" ]]; then
+      echo "[tile-server] build failed; using existing binary ${BIN}"
+    else
+      echo "[tile-server] build failed and no existing binary; aborting"
+      exit 1
+    fi
+  fi
+else
+  if [[ -x "${BIN}" ]]; then
+    echo "[tile-server] g++ not found; using existing binary ${BIN}"
+  else
+    echo "[tile-server] g++ not found and no existing binary; aborting"
+    exit 1
+  fi
+fi
 
 echo "[tile-server] starting on port ${PORT}"
 cd "${ROOT}"
