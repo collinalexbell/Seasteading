@@ -18,6 +18,7 @@
 (defparameter *http-pidfile* (merge-pathnames "server_http.pid" *root*))
 (defparameter *tile-pidfile* (merge-pathnames "server.pid" *root*))
 (defparameter *port-conflicts* (make-hash-table))
+(defparameter *exe-signatures* (make-hash-table :test #'equal))
 
 (defun read-pid (path)
   (when (probe-file path)
@@ -40,6 +41,24 @@
 
 (defun clear-conflict (port)
   (remhash port *port-conflicts*))
+
+(defun exe-signature (path)
+  (when (probe-file path)
+    (let* ((tru (truename path))
+           (size (with-open-file (s tru :direction :input :element-type '(unsigned-byte 8))
+                   (file-length s)))
+           (date (file-write-date tru)))
+      (list tru size date))))
+
+(defun sig-changed-p (key path)
+  (let ((cur (exe-signature path))
+        (prev (gethash key *exe-signatures*)))
+    (if (equal cur prev)
+        nil
+        (progn (setf (gethash key *exe-signatures*) cur) (when prev t)))))
+
+(defun clear-sigs ()
+  (clrhash *exe-signatures*))
 
 (defun write-pid (path pid)
   (with-open-file (s path :direction :output :if-exists :supersede :if-does-not-exist :create)
@@ -71,6 +90,7 @@
   (dolist (pf (list *http-pidfile* *tile-pidfile*))
     (when (probe-file pf) (delete-file pf)))
   (clrhash *port-conflicts*)
+  (clear-sigs)
   (values))
 
 (defun status ()
@@ -101,6 +121,11 @@
 
 (defun start-tile ()
   (uiop:with-current-directory (*root*)
+    ;; if binary changed, restart tile server
+    (when (sig-changed-p :server (merge-pathnames "server" *root*))
+      (let ((pid (read-pid *tile-pidfile*)))
+        (when (proc-alive-p pid) (kill-pid pid))))
+
     (clear-conflict *tile-port*)
     (when (port-pids *tile-port*)
       (record-conflict *tile-port*)
