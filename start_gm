@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "${ROOT}"
+
+# Ensure Quicklisp setup if present
+export SBCL_HOME="${SBCL_HOME:-}"
+
+sbcl --noinform --eval "(load \"${ROOT}/mmo-gm.lisp\")" \
+     --eval "(in-package :mmo-gm)" \
+     --eval "(start-all)" \
+     --eval "(progn (format t \"~%Started. In package: ~A~%\" *package*) (sb-ext:quit))" \
+     --disable-debugger \
+     --quit
