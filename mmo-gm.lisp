@@ -8,7 +8,9 @@
   (:export #:start-all
            #:stop-all
            #:status
-           #:start-repl))
+           #:start-repl
+           #:start-runner
+           #:stop-runner))
 
 (in-package #:mmo-gm)
 
@@ -17,6 +19,7 @@
 (defparameter *tile-port* 8081)
 (defparameter *http-pidfile* (merge-pathnames "server_http.pid" *root*))
 (defparameter *tile-pidfile* (merge-pathnames "server.pid" *root*))
+(defparameter *runner-pidfile* (merge-pathnames "runner.pid" *root*))
 (defparameter *port-conflicts* (make-hash-table))
 (defparameter *exe-signatures* (make-hash-table :test #'equal))
 
@@ -73,7 +76,8 @@
 
 (defun stop-all ()
   (let ((pids (remove nil (list (read-pid *http-pidfile*)
-                                (read-pid *tile-pidfile*)))))
+                                (read-pid *tile-pidfile*)
+                                (read-pid *runner-pidfile*)))))
     (dolist (pid pids)
       (when (proc-alive-p pid)
         (kill-pid pid))))
@@ -87,7 +91,7 @@
                           (parse-integer line :junk-allowed t))))
             (when pid (kill-pid pid)))))))
   ;; clear stale pidfiles
-  (dolist (pf (list *http-pidfile* *tile-pidfile*))
+  (dolist (pf (list *http-pidfile* *tile-pidfile* *runner-pidfile*))
     (when (probe-file pf) (delete-file pf)))
   (clrhash *port-conflicts*)
   (clear-sigs)
@@ -95,9 +99,11 @@
 
 (defun status ()
   (let ((http (read-pid *http-pidfile*))
-        (tile (read-pid *tile-pidfile*)))
+        (tile (read-pid *tile-pidfile*))
+        (runner (read-pid *runner-pidfile*)))
     (format t "~%HTTP: ~A~%" (if (proc-alive-p http) http "stopped"))
     (format t "Tile: ~A~%" (if (proc-alive-p tile) tile "stopped"))
+    (format t "Runner: ~A~%" (if (proc-alive-p runner) runner "stopped"))
     (maphash (lambda (port pids)
                (format t "Conflict on ~A -> ~A~%" port pids))
              *port-conflicts*)))
@@ -119,6 +125,9 @@
         (uiop:run-program (list "make" "server") :output :interactive :error-output :interactive :directory *root*)
         (probe-file (merge-pathnames "server" *root*)))))
 
+(defun ensure-runner-script ()
+  (probe-file (merge-pathnames "ship-runner.js" *root*)))
+
 (defun start-tile ()
   (uiop:with-current-directory (*root*)
     ;; if binary changed, restart tile server
@@ -136,12 +145,30 @@
                           :output :interactive :error-output :interactive :wait nil)
         (error "Could not find or build server binary"))))
 
+(defun start-runner ()
+  (uiop:with-current-directory (*root*)
+    (when (sig-changed-p :runner (merge-pathnames "ship-runner.js" *root*))
+      (let ((pid (read-pid *runner-pidfile*)))
+        (when (proc-alive-p pid) (kill-pid pid))
+        (when (probe-file *runner-pidfile*) (delete-file *runner-pidfile*))))
+    (unless (ensure-runner-script)
+      (error "ship-runner.js not found"))
+    (uiop:run-program (list "./start_runner.sh")
+                      :environment (list (format nil "SOCK=~A" "/tmp/ship_runner.sock"))
+                      :output :interactive :error-output :interactive)))
+
+(defun stop-runner ()
+  (let ((pid (read-pid *runner-pidfile*)))
+    (when (proc-alive-p pid) (kill-pid pid))
+    (when (probe-file *runner-pidfile*) (delete-file *runner-pidfile*))))
+
 (defun start-all (&key (frontend-port *frontend-port*) (tile-port *tile-port*))
   (setf *frontend-port* frontend-port
         *tile-port* tile-port)
   (stop-all)
   (start-http)
   (start-tile)
+  (start-runner)
   (status))
 
 (defun ensure-quicklisp ()
