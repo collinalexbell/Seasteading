@@ -40,7 +40,11 @@ fi
 
 echo "[tile-server] starting on port ${PORT}"
 cd "${ROOT}"
-nohup "${BIN}" >> "${LOG}" 2>&1 &
+if command -v setsid >/dev/null 2>&1; then
+  setsid nohup "${BIN}" >> "${LOG}" 2>&1 < /dev/null &
+else
+  nohup "${BIN}" >> "${LOG}" 2>&1 < /dev/null &
+fi
 NEW_PID=$!
 echo "${NEW_PID}" > "${PIDFILE}"
 echo "[tile-server] pid ${NEW_PID}, log ${LOG}"

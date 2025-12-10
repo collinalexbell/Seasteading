@@ -12,6 +12,10 @@ if [[ -S "${SOCK}" ]]; then
   rm -f "${SOCK}"
 fi
 
-SHIP_RUNNER_SOCK="${SOCK}" SHIP_RUNNER_HZ="${HZ}" nohup node "${ROOT}/ship-runner.js" >"${LOGFILE}" 2>&1 &
+if command -v setsid >/dev/null 2>&1; then
+  setsid SHIP_RUNNER_SOCK="${SOCK}" SHIP_RUNNER_HZ="${HZ}" nohup node "${ROOT}/ship-runner.js" >"${LOGFILE}" 2>&1 < /dev/null &
+else
+  SHIP_RUNNER_SOCK="${SOCK}" SHIP_RUNNER_HZ="${HZ}" nohup node "${ROOT}/ship-runner.js" >"${LOGFILE}" 2>&1 < /dev/null &
+fi
 echo $! > "${PIDFILE}"
 echo "[runner] started pid $(cat "${PIDFILE}") log ${LOGFILE} sock ${SOCK}"
